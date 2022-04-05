@@ -1,0 +1,284 @@
+---
+title: "Disease mapping con INLA"
+subtitle: "Máster en Bioestadística. Universitat de València"
+author: "Aida Montalar"
+date: "26/11/2020"
+output: pdf_document
+editor_options: 
+  chunk_output_type: console
+---
+
+\renewcommand{\figurename}{\textbf{Figura}}
+<!-- \setlength{\parindent}{15pt} -->
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(eval=TRUE,echo=FALSE,error=FALSE,
+    warning=FALSE,message = FALSE,comment = " ",fig.align="center")
+setwd("~/BIOESTADÍSTICA máster/ESPECIALIZACIÓN máster/INLA/tarea_inla")
+```
+
+
+<div style="text-align: justify">
+
+```{r}
+
+## librerías----------------------------------------------------------------
+library(sf)
+library(maptools)
+library(rgdal)
+library(spdep)
+library(lattice)
+library(latticeExtra)
+library(viridis)
+library(gridExtra)
+library(RColorBrewer)
+library(INLA)
+```
+
+Queremos estudiar la mortalidad por enfermedad isquémica en hombres en Aragón durante el periodo 1991-2000. Modelizaremos entonces la Razón de Mortalidad Estandarizada (RME) de los 729 municipios de esa comunidad autónoma y, para evitar los problemas de estimación en áreas pequeñas, incluiremos en el modelo efectos aleatorios con dependencia espacial y heterogéneo. Más concretamente, implementaremos el modelo de Besag, York y Mollié (BYM), que recurre a los modelos jerárquicos bayesianos. En este caso, lo implementaremos mediante INLA.
+
+
+```{r message = FALSE, results="hide"}
+
+## cargamos los datos -----------------------------------------------------
+# Spatial polygon
+aragon<-readOGR("~/BIOESTADÍSTICA máster/ESPECIALIZACIÓN máster/cartografia de enfermedades/tarea_cartografia/aragon.shp")
+load("Aragon.Rdata")
+head(as.data.frame(aragon))
+aragon<-aragon[order(aragon$CODMUNI),] # ordenamos
+```
+
+Tras cargar y ordenar los datos, podemos representarlos. Mostramos en la figura 1 los municipios de Aragón con los valores de los observados/esperados por intervalos.
+
+```{r  fig.cap = 'Observados/Esperados'}
+
+##  dibujamos los datos ----------------------------------------------------
+aragon$SMR_raw <- O/E
+SMR_raw.cutoff<- c(0, 0.2, 0.5, 1, 9)
+SMR_raw_disc = cut(aragon$SMR_raw,
+               breaks         = SMR_raw.cutoff,
+               include.lowest = TRUE) 
+aragon$SMR_raw_disc <- SMR_raw_disc
+spplot(aragon,
+       c("SMR_raw_disc"),
+       col.regions  = brewer.pal(9,'BuPu')[c(2,4,6,8)],
+       par.settings = list(axis.line=list(col='transparent')))
+```
+
+Utilizamos la función `poly2nb()` para crear la relación de vecindad, y `nb2INLA()` para generar el grafo que utilizaremos, asociado a nuestro mapa y a la relación de vecindad que hemos definido (podemos verlo en la figura 2). Ambas funciones son del paquete *spdep*.
+
+
+```{r fig.cap = 'Grafo'}
+
+## definimos la relación de vecindad ---------------------------------------
+vecindades<-poly2nb(aragon)
+nb2INLA("grafo_ar.graph", vecindades) # generamos el grafo
+H <- inla.read.graph(filename="grafo_ar.graph")
+# image(inla.graph2matrix(H),xlab="",ylab="") # matriz de precision:
+# 1 es vecino; 0 no es vecino
+plot(H) # representación del grafo
+```
+
+
+<!-- ```{r fig.cap = 'Municipio 250 y sus vecinos'} -->
+<!-- plot_map_neig <- function(neig) # representación del vecindario -->
+<!-- { -->
+<!--   plot(aragon) -->
+<!--   plot(aragon[neig, ], border="white", -->
+<!--        col="orange", add=TRUE) -->
+<!--   plot(aragon[vecindades[[neig]], ], -->
+<!--        border="white", -->
+<!--        col="yellow", add=TRUE) -->
+<!--   legend("bottomright",c("no vecinas", "vecinas", -->
+<!--                     paste("zona", neig )),bty="n", -->
+<!--          fill=c("white","yellow","orange")) -->
+<!-- } -->
+<!-- plot_map_neig(250) # el 250 y sus vecinos -->
+<!-- ``` -->
+
+
+# Modelo de Besag York y Mollié utilizando INLA
+
+El modelo BYM a implementar es el siguiente:
+
+\begin{eqnarray}
+\nonumber
+O_i\sim Poisson(\lambda_i) \\
+\nonumber
+\lambda_i=E_i\cdot RME_i \\
+\nonumber
+\log(RME_i)=\beta_0+S_i+U_i \\
+\nonumber
+S_i\sim CAR.Normal(\sigma_s^2) \\
+\nonumber
+U_i\sim N(0,\sigma_u^2)
+\nonumber
+\end{eqnarray}
+
+
+El código R utilizado para crear el modelo, así como el resto del código del trabajo, se encuentra en el Anexo.
+
+Cabe destacar los efectos aleatorios en el modelo: *S*, que tendrá en cuenta la estructura espacial (esperamos que municipios cercanos tengan RME similares); y *U*, no estructurado (estructurado con estructura independiente), que es un efecto independiente idénticamente distribuido y es quien modeliza el resto de la varianza (la heterogeneidad entre municipios).
+
+En cuanto a los hiperparámetros, trabajamos con precisiones ($\tau$) en lugar de varianzas, y en este caso reparametrizamos  $\tau_s$ y $\tau_u$ (de los efectos S y U respectivamente) en términos de su logaritmo, de modo que en este caso, hemos elegido:
+
+\begin{eqnarray}
+\nonumber
+\log(\tau_s)\sim logGamma(1,0.001) \\
+\nonumber
+\log(\tau_u)\sim logGamma(1,0.001)
+\nonumber
+\end{eqnarray}
+
+
+
+Se pide, además, calcular la probabilidad de que la RME sea mayor que 1. Para ello, ponemos *cdf* como *log(1)*, pues *cdf* es la densidad acumulada.
+
+
+```{r }
+
+## ajustamos el modelo BYM--------------------------------------------------
+S<-U<-seq(1,length(O)) # efectos aleatorios: S estructurado, U no estructurado
+data<-as.data.frame(cbind(O,E,distancia,S,U))
+# fórmula:
+formula <- O ~ 1 + f(S,
+                     model       = "besag",
+                     graph       = H,
+                     scale.model = TRUE,
+                     hyper       =
+                       list(prec = list(prior="loggamma",param = c(1,0.001)))) +
+  f(U,
+    model       = "iid",
+    hyper       =
+      list(prec = list(prior="loggamma",param = c(1,0.001))))
+# ajuste:
+modelo1 <- inla(formula,
+                     family          = "poisson",
+                     data            = data,
+                     E               = E, # el offset log(E)
+                     control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+                     control.predictor = list(compute=TRUE, cdf=c(log(1))))
+summary(modelo1)
+```
+
+Obtenemos que las medias de las distribuciones a posteriori del intercepto, S y U son -0.061, 20.35 y 549.19, respectivamente. Además, esa estimación puntual del intercepto no es relevante, pues su intervalo de credibilidad al 95% contiene al 0 y, de forma similar, vemos que los dos efectos aleatorios S y U sí son relevantes (su intervalo de credibilidad al 95% no contiene al 0).
+
+También vemos que el DIC es aproximadamente 1899.15, y el WAIC de 1904.09, lo cual nos serviría para comparar ajustes entre otros modelos.
+
+
+<!-- ## Validación del modelo -->
+
+<!-- ```{r} -->
+<!-- ## Validación del modelo ------------------ -->
+<!-- shapiro.test(resid(modelo1)) # Estudio normalidad de los residuos -->
+
+<!-- # Pintamos un mapa con los residuos -->
+<!-- plot(map.poly,col=Paleta[findInterval(resid(modelo1),c(-10,-2,-1,0,1,2,10))]) -->
+<!-- title("Residuos del modelo 3") -->
+<!-- legend("topright",c("< -2","(-2, -1)","(-1, 0)","(0, 1)","(1, 2)","> 2"),fill=Paleta) -->
+
+<!-- # Estudiamos los residuos del modelo -->
+<!-- par(mfrow=c(2,2)); plot(modelo1); par(mfrow=c(1,1)) -->
+
+<!-- # Estudiamos la autocorrelación espacial en los residuos -->
+<!-- moran.test(resid(modelo1),nb2listw(map.nb)) # Test de Moran -->
+<!-- geary.test(resid(modelo1),nb2listw(map.nb)) # Test de Geary -->
+<!-- ``` -->
+
+
+# Representación geográfica de los resultados
+
+<!-- ```{r} -->
+<!-- ## Distribución a posteriori de los efectos aleatorios -->
+<!-- aragon$SPmean <- round(modelo1$summary.random$S[["mean"]], 4)  -->
+<!-- aragon$SPsd <- round(modelo1$summary.random$S[["sd"]],5) -->
+<!-- grid.arrange( -->
+<!--   spplot(aragon, c("SPmean"), -->
+<!--          main = c("Media posteriori de S"), -->
+<!--          #col.regions = rev(viridis_pal(option = "B")(101)), -->
+<!--          col.regions = colorRampPalette(brewer.pal(9,'BuPu'))(101), -->
+<!--          cuts        = 100, -->
+<!--          colorkey=list(space="bottom", space = "bottom"), -->
+<!--          par.settings = -->
+<!--            list(axis.line = list(col =  'transparent', -->
+<!--                                  legend.ticks = 'black'))), -->
+<!--   spplot(aragon, c("SPsd"), -->
+<!--          main = c("Sd posteriori de S"), -->
+<!--          col.regions = colorRampPalette(brewer.pal(9,'BuPu'))(101), -->
+<!--          cuts        = 100, -->
+<!--          colorkey=list(space="bottom", space = "bottom"), -->
+<!--          par.settings = -->
+<!--            list(axis.line = list(col =  'transparent', -->
+<!--                                  legend.ticks = 'black'))), -->
+<!--   ncol = 2) -->
+<!-- ``` -->
+
+En la figura 3 podemos visualizar los valores de la media y la desviación típica a posteriori de la razón de mortalidad estandarizada en cada municipio de Aragón.
+
+```{r fig.cap = 'Distribución geográfica de la media y desviación típica de la RME a posteriori'}
+
+## Distribución a posteriori de la RME--------------------------------------
+# la RME se corresponde con los fitted values.
+aragon$SMR_mean <- modelo1$summary.fitted.values$mean # media
+aragon$SMR_sd <- modelo1$summary.fitted.values$sd # sd
+aragon$SMR_median <- modelo1$summary.fitted.values$`0.5quant` # median
+aragon$SMR_q025 <- modelo1$summary.fitted.values$`0.025quant` # quantile
+aragon$SMR_q975 <- modelo1$summary.fitted.values$`0.975quant` # quantile
+aragon$SMR_p1 <- 1 - modelo1$summary.fitted.values$`1 cdf` # P(RME>1)
+grid.arrange(spplot(aragon,
+                    c("SMR_mean"),
+                    col.regions = colorRampPalette(brewer.pal(9,'BuPu'))(101),
+                    cuts         = 100,
+                    main        = "media de RME",
+                    colorkey=list(space="bottom"),
+                    par.settings =
+                      list(axis.line = list(col =  'transparent'))),
+             spplot(aragon,
+                    c("SMR_sd"),
+                    col.regions = colorRampPalette(brewer.pal(9,'BuPu'))(101),
+                    cuts         = 100,
+                    main        = "sd de RME ",
+                    colorkey=list(space="bottom"),
+                    par.settings =
+                      list(axis.line = list(col =  'transparent'))), ncol = 2)
+```
+
+También podemos discretizar los posibles valores de la media de RME a posteriori con el fin de visualizar de forma todavía más sencilla y directa qué municipios tienen mayor o menor RME que otros. Esto mismo, junto a la probabilidad de que dicha RME exceda el valor 1, queda representado en la figura 4.
+
+```{r fig.cap = 'Distribución geográfica de la media (por intervalos) de la RME y P(RME>1), a posteriori'}
+
+## Distribución a posteriori de la RME con intervalos y P -------------------
+SMR.cutoff<- c(0.5, 0.9, 1.0, 1.1,1.8)
+SMR_p1.cutoff <- c(0,0.2,0.4,0.6,0.8,1)
+SMR_disc = cut(aragon$SMR_mean,
+               breaks        = SMR.cutoff,
+               include.lowest= TRUE)
+SMR_p1_disc = cut(aragon$SMR_p1,
+               breaks        = SMR_p1.cutoff,
+               include.lowest= TRUE)
+aragon$SMR_disc <- SMR_disc
+aragon$SMR_p1_disc <- SMR_p1_disc
+grid.arrange(spplot(aragon,
+                    c("SMR_disc"),
+                    col.regions = brewer.pal(9,'BuPu')[c(2,4,6,8)],
+                    main        = "RME",
+                    par.settings=list(axis.line = list(col='transparent'))),
+             spplot(aragon,
+                    c("SMR_p1_disc"),
+                    col.regions = brewer.pal(9,'BuPu')[c(1,3,5,7,9)],
+                    main        = "P (RME > 1) ",
+                    par.settings=list(axis.line=list(col='transparent'))),ncol=2)
+```
+
+
+Tenemos que la probabilidad de que la razón de mortalidad estandarizada sea mayor que 1 es por lo general más elevada en la parte central de esta comunidad autónoma que en el norte o sur, sobre todo en la parte oeste, en comarcas como por ejemplo Tarazona y el Moncayo, Campo de Borja, Ribera Alta del Ebro y Cinco Villas. Sería por tanto en esta zona oeste de la provincia de Zaragoza donde pensamos que la mortalidad a causa de enfermedad isquémica es más preocupante en Aragón en el periodo de estudio.
+
+\pagebreak
+
+# Anexo: código de R
+
+```{r ref.label=knitr::all_labels(),echo=TRUE,eval=FALSE}
+
+```
+
